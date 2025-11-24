@@ -1,10 +1,8 @@
-package MM1_Finite;
-
 import java.util.*;
 import java.io.*;
 import java.nio.file.*;
 
-public class MM1_Finite {
+public class mm1_finite {
     // Parameters
     private final double lambda;         // arrival rate
     private final double mu;             // service rate
@@ -52,7 +50,7 @@ public class MM1_Finite {
     private BufferedWriter tsWriter = null;
 
     // Constructor
-    public MM1_Finite(double lambda, double mu, int K, long maxCompleted) {
+    public mm1_finite(double lambda, double mu, int K, long maxCompleted) {
         this.lambda = lambda;
         this.mu = mu;
         this.K = K;
@@ -312,6 +310,6 @@ public class MM1_Finite {
 
         long maxCompleted = 900000;
 
-        new MM1_Finite(lambda, mu, K, maxCompleted).run();
+        new mm1_finite(lambda, mu, K, maxCompleted).run();
     }
 }

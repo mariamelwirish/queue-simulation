@@ -1,10 +1,9 @@
-package MM1_w_Deadline;
 
 import java.util.*;
 import java.io.*;
 import java.nio.file.*;
 
-public class MM1wDeadline {
+public class mm1_deadline {
     // Parameters
     private final double lambda;         // arrival rate
     private final double mu;             // service rate (server capacity)
@@ -61,7 +60,7 @@ public class MM1wDeadline {
     private BufferedWriter tsWriter = null;   // time series per master-clock event
 
     // Constructor
-    public MM1wDeadline(double lambda, double mu, double deadlineRate, long maxCompleted) {
+    public mm1_deadline(double lambda, double mu, double deadlineRate, long maxCompleted) {
         this.lambda = lambda;
         this.mu = mu;
         this.deadlineRate = deadlineRate; // [DEADLINE]
@@ -293,6 +292,6 @@ public class MM1wDeadline {
 
         long maxCompleted = 100000;
 
-        new MM1wDeadline(lambda, mu, delta, maxCompleted).run();
+        new mm1_deadline(lambda, mu, delta, maxCompleted).run();
     }
 }

@@ -1,10 +1,9 @@
-package MM1_Infinite;
 
 import java.util.*;
 import java.io.*;
 import java.nio.file.*;
 
-public class MM1_Infinite {
+public class mm1_infinite {
     // Parameters
     private final double lambda;         // arrival rate
     private final double mu;             // service rate (server capacity)
@@ -49,7 +48,7 @@ public class MM1_Infinite {
     private BufferedWriter tsWriter = null;   // time series per master-clock event
 
     // Constructor
-    public MM1_Infinite(double lambda, double mu, long maxCompleted) {
+    public mm1_infinite(double lambda, double mu, long maxCompleted) {
         this.lambda = lambda;
         this.mu = mu;
         this.MAX_COMPLETED = maxCompleted;
@@ -262,6 +261,6 @@ public class MM1_Infinite {
 
         long maxCompleted = 100000;
 
-        new MM1_Infinite(lambda, mu, maxCompleted).run();
+        new mm1_infinite(lambda, mu, maxCompleted).run();
     }
 }
