@@ -1,95 +1,40 @@
 import java.util.*;
 import java.io.*;
 
-/**
- * M/M/c queue simulator with deadlines and FIFO service.
- *
- * 
- * BASELINE MODEL (when all flags disabled):
- * 
- * - Exponential interarrival times (rate lambda)
- * - Exponential service times (rate mu)
- * - Exponential deadlines/patience (rate DEADLINE_RATE)
- * - Infinite buffer (no blocking)
- * - FIFO service
- *
- * 
- * DETERMINISTIC MODE (DDC) — enabled via flags:
- * 
- * - Deterministic interarrival times (1 / lambda)
- * - Deterministic service times (1 / mu)
- * - Deadlines remain exponential
- *
- * 
- * DROP MODE — enabled via flag:
- * 
- * - Jobs whose deadlines expire before service are DROPPED
- * - Dropped jobs do not consume service
- *
- * 
- * UNIFIED DEADLINE METRIC:
- * 
- * - pExpired = P(job expires before service begins)
- *   • If DROP_EXPIRED = false → expired jobs are still served
- *   • If DROP_EXPIRED = true  → expired jobs are dropped
- *
- * This file serves as a controlled extension of the baseline simulator.
- * All changes are guarded by flags so the original behavior is preserved
- * and can be used as a reference for comparison.
- *
- * 
- * For each rho in [RHO_START, RHO_END] with step RHO_STEP:
- * 
- *  1. Sets lambda = rho * c * mu
- *  2. Runs the simulation until RUN_COMPLETED jobs complete service
- *  3. Estimates Ns, Nq, Ds, Dq
- *  4. Computes Erlang-C M/M/c theory (baseline reference)
- *  5. Estimates pExpired
- *  6. Writes one summary row to CSV
- *
- * NOTE:
- * - Erlang-C theory applies strictly to the baseline M/M/c model
- * - In deterministic or drop modes, theory values are kept only
- *   as a reference baseline
- */
 public class fifo {
 
-    
-    // CONTROL PARAMETERS
-    
+    // CONTROL VARIABLES
+    // Number of arrivals.
+    static final int RUN_COMPLETED = 1000000; 
 
-    // Number of completed jobs per rho value
-    static final int RUN_COMPLETED = 1000000;
-
-    // rho sweep range
+    // rho sweep range.
     static final double RHO_START = 0.05;
     static final double RHO_END   = 0.95;
     static final double RHO_STEP  = 0.05;
 
-    // Service rate and number of servers
+    // Service rate and number of servers.
     static final double MU = 1.0;
-    static final int C = 1;
+    static final int C = 5;
 
-    // Deadline (patience) rate
-    static final double DEADLINE_RATE = 0.1;
+    // Probability of small-tight packets.
+    static final double PROB_TIGHT = 0.5;
 
+    // Deadline ranges classes.
+    static final double DEADLINE_RATE_TIGHT = 2.0;
+    static final double DEADLINE_RATE_LOOSE = 0.5;
     
-    // MODE FLAGS (baseline preserved)
-    
+    // Packet size classes.
+    static final double SMALL_PCKT_SIZE = 2.5; 
+    static final double LARGE_PCKT_SIZE = 10; 
+    static final double GEOM_P_TIGHT = 1 / SMALL_PCKT_SIZE; // for geometric distribution
+    static final double GEOM_P_LOOSE = 1 / LARGE_PCKT_SIZE; // for geometric distribution
 
-    // Deterministic arrival process
-    static final boolean DETERMINISTIC_ARRIVAL = false;
+    // Flags to control simulation modes.
+    static final boolean DETERMINISTIC_ARRIVAL = false; // Deterministic arrival process
+    static final boolean DETERMINISTIC_SERVICE = false; // Deterministic service times
+    static final boolean DROP_EXPIRED = true; // Drop expired customers at service start
 
-    // Deterministic service times
-    static final boolean DETERMINISTIC_SERVICE = false;
-
-    // Drop jobs whose deadlines expire before service
-    static final boolean DROP_EXPIRED = false;
-
-    
-    // CSV FILE SELECTION
-    
-
+    // CSV output file (mode-aware).
     static final String CSV_FILE;
     static {
         // Build a mode-aware filename to avoid overwriting.
@@ -102,34 +47,31 @@ public class fifo {
         }
     }
 
-    // Random number generator (used only in exponential mode)
-    static final Random RNG = new Random(12345);
+    /*******************************************************************************************/
+    // SIMULATION STRUCTURE HELPERS
 
-    
-    // EVENT TYPES
-    
+    // Random number generators
+    static final Random RNG_PKT = new Random(12345); // for arrivals, deadlines, sizes
+    static final Random RNG_SVC = new Random(54321); // for service times
 
-    private static enum EventType {
+    // Event types.
+    private enum EventType {
         ARRIVAL,
         DEPARTURE
     }
 
-    
-    // EVENT CLASS
-    
-
-    /**
-     * Generic event stored in the future event list (FEL).
-     */
+    // Event class.
     private static class Event implements Comparable<Event> {
         double time;
         EventType type;
-        int serverId;
+        int serverIndex;
+        Customer customer;
 
-        Event(double time, EventType type, int serverId) {
+        Event(double time, EventType type, int serverIndex, Customer customer) {
             this.time = time;
             this.type = type;
-            this.serverId = serverId;
+            this.serverIndex = serverIndex;
+            this.customer = customer;
         }
 
         @Override
@@ -138,79 +80,61 @@ public class fifo {
         }
     }
 
-    
-    // SERVICE DEPARTURE EVENT
-    
+    // Server class.
+    private static class Server {
+        boolean busy;
+        Customer customer;
 
-    /**
-     * Departure event that remembers arrival time
-     * for delay calculations.
-     */
-    private static class ServiceEvent extends Event {
-        double arrivalTime;
-
-        ServiceEvent(double time, int serverId, double arrivalTime) {
-            super(time, EventType.DEPARTURE, serverId);
-            this.arrivalTime = arrivalTime;
+        Server() {
+            busy = false;
+            customer = null;
         }
     }
 
-    // SERVER & CUSTOMER CLASSES
-
-    private static class Server {
-        boolean busy = false;
-    }
-
-    private static class Customer {
+    // Customer (packet) class.
+    static class Customer {
         double arrivalTime;
         double deadlineTime;
+        boolean isTight;
+        int lengthBits;
 
-        Customer(double arrivalTime, double deadlineTime) {
-            this.arrivalTime  = arrivalTime;
+        Customer(double arrivalTime, double deadlineTime, boolean isTight, int lengthBits) {
+            this.arrivalTime = arrivalTime;
             this.deadlineTime = deadlineTime;
+            this.isTight = isTight;
+            this.lengthBits = lengthBits;
         }
     }
 
-    // SUMMARY CLASS
-    /**
-     * Holds statistics for a single (lambda, mu, c) run.
-     */
+    // Summary statistics class.
     private static class Summary {
         double avgNs, avgNq, avgDs, avgDq;
         double utilization;
         int completed;
-
-        double Ns_th, Nq_th, Ds_th, Dq_th;
-
-        double pExpired;
-    }
-
-    /**
-     * Row written to CSV for each rho.
-     */
-    private static class SummaryRow {
-        double rho, lambda, mu;
-        int c;
-
-        double Ns_sim, Ns_th;
-        double Nq_sim, Nq_th;
-        double Ds_sim, Ds_th;
-        double Dq_sim, Dq_th;
-
-        double utilization_sim;
         double pExpired_sim;
+        double pServed;
     }
 
-    // EXPONENTIAL SAMPLING
-
-    private static double expSample(double rate) {
-        double u = RNG.nextDouble();
+    // exponential(rate) sample using inverse-CDF.
+    private static double expSample(double rate, Random rng) {
+        double u = rng.nextDouble();
         if (u == 0.0) u = 1e-16;
         return -Math.log(1.0 - u) / rate;
     }
 
-    // FIND IDLE SERVER
+    // Geometric(p) sample using inverse-CDF.
+    private static int geometricSample(double p, Random rng) {
+        // X = ceil( log(1-U) / log(1-p) )
+        double u = rng.nextDouble();
+        if (u == 0.0) u = 1e-16;
+        return (int) Math.ceil(Math.log(1.0 - u) / Math.log(1.0 - p));
+    }
 
+
+    /*******************************************************************************************/
+    // SIMULATION CORE      
+
+    // Find an idle server index, or -1 if none.
     private static int findIdleServer(Server[] servers) {
         for (int i = 0; i < servers.length; i++) {
             if (!servers[i].busy) return i;
@@ -218,281 +142,150 @@ public class fifo {
         return -1;
     }
 
-    // SINGLE RUN SIMULATOR
-    /**
-     * Runs a single FIFO simulation with deadlines.
-     *
-     * INVARIANTS:
-     *  - Ns counts ONLY jobs that are either in service or waiting in queue
-     *  - Each job contributes:
-     *        exactly one Ns++ (when admitted)
-     *        exactly one Ns-- (when leaving system)
-     *
-     * DEADLINE HANDLING:
-     *  - If DROP_EXPIRED = false:
-     *        expired jobs are still served
-     *  - If DROP_EXPIRED = true:
-     *        expired jobs are removed immediately and never served
-     *
-     * pExpired:
-     *  - Probability a job expires before service begins
-     *  - Counted regardless of whether the job is later served or dropped
-     */
-    private static Summary simulate(double lambda, double mu, int c, double deadlineRate) {
-
+    // Main simulation method.
+    private static Summary simulate(double lambda, double mu, int c) {
+        Summary S = new Summary();
         PriorityQueue<Event> fel = new PriorityQueue<>();
-        Queue<Customer> fifoQ = new LinkedList<>();
-
+        Queue<Customer> queue = new ArrayDeque<>();
         Server[] servers = new Server[c];
-        for (int i = 0; i < c; i++) servers[i] = new Server();
+        for (int i = 0; i < c; i++)
+            servers[i] = new Server();
 
+        // State variables
         double t = 0.0;
-        int Ns = 0;        // number in system
-        int Nq = 0;        // number in queue
+        int arrivals = 0;
+        int Ns = 0;
+        int Nq = 0;
 
+        // Integrals
         double areaNs = 0.0;
         double areaNq = 0.0;
-        double[] serverBusyArea = new double[c];
 
-        double totalSystemDelay = 0.0;
-        double totalQueueDelay  = 0.0;
-
-        int arrivals  = 0;
+        // Trackers.
+        int expiredBeforeService = 0;
         int completed = 0;
-        int expired   = 0;
 
-        // Schedule first arrival
-        fel.add(new Event(0.0, EventType.ARRIVAL, -1));
+        // schedule first arrival
+        fel.add(new Event(0.0, EventType.ARRIVAL, -1, null));
 
         while (arrivals < RUN_COMPLETED || Ns > 0) {
-        
+
             Event e = fel.poll();
             double oldT = t;
             t = e.time;
 
-            // ---- time integrals ----
+            // time integrals update
             double dt = t - oldT;
             areaNs += Ns * dt;
             areaNq += Nq * dt;
-            for (int i = 0; i < c; i++)
-                if (servers[i].busy)
-                    serverBusyArea[i] += dt;
 
-            
             // ARRIVAL EVENT
-            
             if (e.type == EventType.ARRIVAL) {
                 if (arrivals >= RUN_COMPLETED)
                     continue;
+
                 arrivals++;
 
-                // Schedule next arrival
-                double interArrival =
-                        DETERMINISTIC_ARRIVAL ? 1.0 / lambda : expSample(lambda);
-                fel.add(new Event(t + interArrival, EventType.ARRIVAL, -1));
+                // new packet properties (same in EDF, SJF).
+                boolean isTight = RNG_PKT.nextDouble() < PROB_TIGHT;
+                double deadlineRate = isTight ? DEADLINE_RATE_TIGHT : DEADLINE_RATE_LOOSE;
+                double absDeadline = t + expSample(deadlineRate, RNG_PKT);
+                int lengthBits = isTight ? geometricSample(GEOM_P_TIGHT, RNG_PKT)
+                        : geometricSample(GEOM_P_LOOSE, RNG_PKT);
+                Customer cust = new Customer(t, absDeadline, isTight, lengthBits);
 
-                // Create customer
-                Customer cust = new Customer(t, t + expSample(deadlineRate));
-
-
-
-                // -------- ADMISSION POINT --------
-                // Job is now in the system
+                // admit to system.
                 Ns++;
 
+                // check for idle server, if any.
                 int idle = findIdleServer(servers);
-                if (idle >= 0) {
-                    // Start service immediately
+                if (idle >= 0) { // FOUND = start service immediately
                     servers[idle].busy = true;
-
-                    double serviceTime =
-                            DETERMINISTIC_SERVICE ? 1.0 / mu : expSample(mu);
-
-                    fel.add(new ServiceEvent(t + serviceTime, idle, cust.arrivalTime));
-                } else {
-                    // Join FIFO queue
-                    fifoQ.add(cust);
+                    servers[idle].customer = cust;
+                    double serviceTime = DETERMINISTIC_SERVICE ? 1.0 / mu : expSample(mu, RNG_SVC);
+                    fel.add(new Event(t + serviceTime, EventType.DEPARTURE, idle, cust));
+                } else { // join FIFO queue    
+                    queue.add(cust);
                     Nq++;
                 }
+
+                // schedule next arrival (packet RNG only).
+                double interArrival = DETERMINISTIC_ARRIVAL ? 1.0 / lambda : expSample(lambda, RNG_PKT);
+                fel.add(new Event(t + interArrival, EventType.ARRIVAL, -1, null));
             }
 
-            
             // DEPARTURE EVENT
-            
             else {
 
-                ServiceEvent se = (ServiceEvent) e;
-                int sid = se.serverId;
-
-                // Job leaves system after service
-                completed++;
+                // job completes
+                int s = e.serverIndex;
+                servers[s].busy = false;
+                servers[s].customer = null;
                 Ns--;
-                servers[sid].busy = false;
+                completed++;
 
-                totalSystemDelay += t - se.arrivalTime;
-
-                // Try to start service for next job in queue
-                while (!fifoQ.isEmpty()) {
-
-                    Customer next = fifoQ.poll();
+                // start next from the queue, if any.
+                while (!queue.isEmpty() && !servers[s].busy) {
+                    Customer next = queue.poll();
                     Nq--;
 
-                    // Deadline check at service start
-                    if (t >= next.deadlineTime) {
-                        expired++;
-
-                        if (DROP_EXPIRED) {
-                            // Job leaves system permanently
+                    // deadline check at service start (no expiry upon arrival)
+                    if (t > next.deadlineTime) {
+                        expiredBeforeService++;
+                        if (DROP_EXPIRED) { // drop immediately (counts out of system)  
                             Ns--;
-                            continue;
+                        } else {
+                            // still serve it
+                            servers[s].busy = true;
+                            servers[s].customer = next;
+
+                            double serviceTime = DETERMINISTIC_SERVICE ? 1.0 / mu : expSample(mu, RNG_SVC);
+
+                            fel.add(new Event(t + serviceTime, EventType.DEPARTURE, s, next));
                         }
-                        // else: serve expired job
+                    } else {
+
+                        servers[s].busy = true;
+                        servers[s].customer = next;
+
+                        double serviceTime = DETERMINISTIC_SERVICE ? 1.0 / mu : expSample(mu, RNG_SVC);
+
+                        fel.add(new Event(t + serviceTime, EventType.DEPARTURE, s, next));
                     }
-
-                    totalQueueDelay += t - next.arrivalTime;
-
-                    servers[sid].busy = true;
-
-                    double serviceTime =
-                            DETERMINISTIC_SERVICE ? 1.0 / mu : expSample(mu);
-
-                    fel.add(new ServiceEvent(t + serviceTime, sid, next.arrivalTime));
-                    break;
                 }
-            }
-
-            // ---- SAFETY CHECK (debug only; can remove later) ----
-            if (Ns < 0) {
-                throw new RuntimeException("Ns < 0 at time " + t);
             }
         }
 
-        
-        // BUILD SUMMARY
-        
-
-        Summary S = new Summary();
-        double totalTime = t;
-
-        S.avgNs = areaNs / totalTime;
-        S.avgNq = areaNq / totalTime;
-        S.avgDs = totalSystemDelay / arrivals;
-        S.avgDq = totalQueueDelay / arrivals;
-
-        double busySum = 0.0;
-        for (double b : serverBusyArea) busySum += b;
-        S.utilization = busySum / (c * totalTime);
-
-        S.pExpired = expired / (double) arrivals;
-        System.out.print(expired + " ");
+        // finalize
+        S.avgNs = areaNs / t;
+        S.avgNq = areaNq / t;
+        S.avgDs = S.avgNs / lambda;
+        S.avgDq = S.avgNq / lambda;
         S.completed = completed;
+        S.pExpired_sim = (double) expiredBeforeService / arrivals;
+        S.pServed = (double) completed / arrivals;
+
         System.out.println(completed + " " + arrivals);
         return S;
     }
 
-    
-    // ERLANG-C THEORY (BASELINE REFERENCE)
-
-    private static long factorial(int n) {
-        long f = 1L;
-        for (int i = 2; i <= n; i++) f *= i;
-        return f;
-    }
-
-    private static void computeTheory(Summary S, double lambda, double mu, int c) {
-
-        double a   = lambda / mu;
-        double rho = lambda / (c * mu);
-
-        if (rho >= 1.0) {
-            S.Nq_th = S.Ns_th = S.Dq_th = S.Ds_th = Double.NaN;
-            return;
-        }
-
-        double sum = 0.0;
-        for (int n = 0; n <= c - 1; n++)
-            sum += Math.pow(a, n) / factorial(n);
-
-        double cTerm = Math.pow(a, c) / (factorial(c) * (1 - rho));
-        double P0 = 1.0 / (sum + cTerm);
-        double Pwait = cTerm * P0;
-
-        S.Nq_th = (Pwait * rho) / (1 - rho);
-        S.Ns_th = S.Nq_th + a;
-        S.Dq_th = S.Nq_th / lambda;
-        S.Ds_th = S.Dq_th + 1.0 / mu;
-    }
-
-    // CSV WRITER & MAIN DRIVER
-
-    public static void main(String[] args) {
-
-        List<SummaryRow> rows = new ArrayList<>();
-
-        for (double rho = RHO_START; rho <= RHO_END + 1e-9; rho += RHO_STEP) {
-
+    /*******************************************************************************************/
+    // DRIVER METHOD.
+    public static void main(String[] args) throws Exception {
+        PrintWriter out = new PrintWriter(new FileWriter(CSV_FILE));
+        out.println("rho,lambda,mu,c,Ns_sim,Nq_sim,Ds_sim,Dq_sim,pExpired_sim,pServed");
+        for (double rho = RHO_START; rho <= RHO_END + 1e-12; rho += RHO_STEP) {
             double lambda = rho * C * MU;
-
-            Summary S = simulate(lambda, MU, C, DEADLINE_RATE);
-            computeTheory(S, lambda, MU, C);
-
-            SummaryRow R = new SummaryRow();
-            R.rho = rho;
-            R.lambda = lambda;
-            R.mu = MU;
-            R.c = C;
-
-            R.Ns_sim = S.avgNs;
-            R.Ns_th  = S.Ns_th;
-            R.Nq_sim = S.avgNq;
-            R.Nq_th  = S.Nq_th;
-            R.Ds_sim = S.avgDs;
-            R.Ds_th  = S.Ds_th;
-            R.Dq_sim = S.avgDq;
-            R.Dq_th  = S.Dq_th;
-            R.utilization_sim = S.utilization;
-            R.pExpired_sim = S.pExpired;
-
-            rows.add(R);
+            Summary S = simulate(lambda, MU, C);
+            out.printf(Locale.US,
+                    "%.5f,%.5f,%.5f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f%n",
+                    rho, lambda, MU, C,
+                    S.avgNs, S.avgNq, S.avgDs, S.avgDq,
+                    S.pExpired_sim,
+                    S.pServed);
         }
+        out.close();
+        System.out.println("Simulation completed. Results saved to " + CSV_FILE);
 
-        writeCSV(rows);
-    }
-
-    private static void writeCSV(List<SummaryRow> rows) {
-        try {
-            File f = new File(CSV_FILE);
-            f.getParentFile().mkdirs();
-            PrintWriter pw = new PrintWriter(new FileWriter(f));
-
-            pw.println("rho,lambda,mu,c,"
-                        + "Ns_sim,"
-                        + "Nq_sim,"
-                        + "Ds_sim,"
-                        + "Dq_sim,"
-                        + "pExpired_sim");
-
-
-            for (SummaryRow r : rows) {
-               pw.printf(Locale.US,
-                        "%.4f,%.6f,%.6f,%d,"
-                                + "%.6f,"
-                                + "%.6f,"
-                                + "%.6f,"
-                                + "%.6f,"
-                                + "%.6f%n",
-                        r.rho, r.lambda, r.mu, r.c,
-                        r.Ns_sim,
-                        r.Nq_sim,
-                        r.Ds_sim,
-                        r.Dq_sim,
-                        r.pExpired_sim);
-
-            }
-
-            pw.close();
-        } catch (IOException e) {
-            System.err.println("Error writing CSV: " + e.getMessage());
-        }
     }
 }
