@@ -2,9 +2,9 @@ clear; clc; close all;
 
 % ALGORITHMS
 files = [
-    struct('name','FIFO','file','mmc_fifo.csv')
-    struct('name','EDF','file','2dc_edf.csv')
-    struct('name','SJF','file','mmc_sjf.csv')
+    struct('name','fifo','file','mmc_fifo.csv')
+    struct('name','edf','file','mmc_edf.csv')
+    struct('name','sjf','file','mmc_sjf.csv')
 ];
 
 basePath = "csv/";  
@@ -32,7 +32,8 @@ metrics = {
     'Nq_sim',        'Average number in queue (N_q)';
     'Ds_sim',        'Average system delay (D_s)';
     'Dq_sim',        'Average queue delay (D_q)';
-    'pExpired_sim',  'Probability of expiration'
+    'pExpired_sim',  'Probability of expiration';
+    'pServed', 'Probability of being served';
 };
 
 %  PLOTTING
@@ -55,6 +56,6 @@ for m = 1:size(metrics,1)
 
     xlabel('\rho');
     ylabel(metricName);
-    title(['Comparison of Algorithms: ', metricName]);
+    title([metricName]);
     legend('Location','best');
 end
